@@ -5,9 +5,9 @@
 //! these commands to create a Google Drive-backed filesystem.
 
 mod gdrive_ops;
-mod host_bridge;
 mod multipart;
 
+use diaryx_plugin_sdk::prelude::*;
 use extism_pdk::*;
 use gdrive_ops::GDriveConfig;
 use serde_json::Value as JsonValue;
@@ -19,6 +19,17 @@ use std::cell::RefCell;
 
 thread_local! {
     static CONFIG: RefCell<Option<GDriveConfig>> = const { RefCell::new(None) };
+}
+
+const CONFIG_STORAGE_KEY: &str = "gdrive_config";
+const ACCESS_TOKEN_SECRET_KEY: &str = "gdrive_access_token";
+const REFRESH_TOKEN_SECRET_KEY: &str = "gdrive_refresh_token";
+
+fn default_config() -> GDriveConfig {
+    GDriveConfig {
+        root_folder_id: "root".to_string(),
+        ..GDriveConfig::default()
+    }
 }
 
 fn with_config<F, R>(f: F) -> Result<R, String>
@@ -47,62 +58,96 @@ where
     })
 }
 
-// ---------------------------------------------------------------------------
-// Protocol types
-// ---------------------------------------------------------------------------
+fn persist_config(config: &GDriveConfig) -> Result<(), String> {
+    if config.access_token.is_empty() {
+        host::secrets::delete(ACCESS_TOKEN_SECRET_KEY)?;
+    } else {
+        host::secrets::set(ACCESS_TOKEN_SECRET_KEY, &config.access_token)?;
+    }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct GuestManifest {
-    id: String,
-    name: String,
-    version: String,
-    description: String,
-    capabilities: Vec<String>,
-    #[serde(default)]
-    ui: Vec<JsonValue>,
-    #[serde(default)]
-    commands: Vec<String>,
-    #[serde(default)]
-    cli: Vec<JsonValue>,
+    if config.refresh_token.is_empty() {
+        host::secrets::delete(REFRESH_TOKEN_SECRET_KEY)?;
+    } else {
+        host::secrets::set(REFRESH_TOKEN_SECRET_KEY, &config.refresh_token)?;
+    }
+
+    let mut stored = config.clone();
+    stored.access_token.clear();
+    stored.refresh_token.clear();
+    let data = serde_json::to_vec(&stored).map_err(|e| format!("serialize config: {e}"))?;
+    host::storage::set(CONFIG_STORAGE_KEY, &data)
 }
 
-#[derive(serde::Deserialize)]
-struct CommandRequest {
-    command: String,
-    params: JsonValue,
+fn load_persisted_config() -> Result<Option<GDriveConfig>, String> {
+    let Some(data) = host::storage::get(CONFIG_STORAGE_KEY)? else {
+        return Ok(None);
+    };
+
+    let mut config: GDriveConfig =
+        serde_json::from_slice(&data).map_err(|e| format!("parse config: {e}"))?;
+
+    let stored_access = host::secrets::get(ACCESS_TOKEN_SECRET_KEY)?;
+    let stored_refresh = host::secrets::get(REFRESH_TOKEN_SECRET_KEY)?;
+    let mut migrated = false;
+
+    if let Some(access_token) = stored_access {
+        config.access_token = access_token;
+    } else if !config.access_token.is_empty() {
+        migrated = true;
+    }
+
+    if let Some(refresh_token) = stored_refresh {
+        config.refresh_token = refresh_token;
+    } else if !config.refresh_token.is_empty() {
+        migrated = true;
+    }
+
+    if migrated {
+        persist_config(&config)?;
+    }
+
+    Ok(Some(config))
 }
 
-#[derive(serde::Serialize)]
-struct CommandResponse {
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<JsonValue>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+fn set_runtime_config(config: GDriveConfig) {
+    CONFIG.with(|c| *c.borrow_mut() = Some(config));
 }
 
-impl CommandResponse {
-    fn ok(data: JsonValue) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            error: None,
-        }
+fn current_config_or_default() -> GDriveConfig {
+    CONFIG.with(|c| c.borrow().clone().unwrap_or_else(default_config))
+}
+
+fn merge_with_current_config(mut incoming: GDriveConfig) -> GDriveConfig {
+    let current = current_config_or_default();
+    if incoming.access_token.is_empty() {
+        incoming.access_token = current.access_token;
     }
-    fn ok_empty() -> Self {
-        Self {
-            success: true,
-            data: None,
-            error: None,
-        }
+    if incoming.refresh_token.is_empty() {
+        incoming.refresh_token = current.refresh_token;
     }
-    fn err(msg: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            data: None,
-            error: Some(msg.into()),
-        }
+    if incoming.client_id.trim().is_empty() {
+        incoming.client_id = current.client_id;
     }
+    if incoming.root_folder_id.trim().is_empty() {
+        incoming.root_folder_id = if current.root_folder_id.trim().is_empty() {
+            "root".to_string()
+        } else {
+            current.root_folder_id
+        };
+    }
+    incoming
+}
+
+fn view_config(config: &GDriveConfig) -> JsonValue {
+    serde_json::json!({
+        "client_id": config.client_id,
+        "root_folder_id": if config.root_folder_id.is_empty() {
+            "root"
+        } else {
+            config.root_folder_id.as_str()
+        },
+        "connected": !config.refresh_token.is_empty(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -112,11 +157,22 @@ impl CommandResponse {
 #[plugin_fn]
 pub fn manifest(_input: String) -> FnResult<String> {
     let m = GuestManifest {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
         id: "diaryx.storage.gdrive".into(),
         name: "Google Drive Storage".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         description: "Google Drive as a filesystem backend".into(),
         capabilities: vec!["custom_commands".into()],
+        requested_permissions: Some(GuestRequestedPermissions {
+            defaults: serde_json::json!({
+                "http_requests": { "include": ["googleapis.com"], "exclude": [] },
+                "plugin_storage": { "include": ["all"], "exclude": [] }
+            }),
+            reasons: [
+                ("http_requests".to_string(), "Communicate with Google Drive and Google OAuth API endpoints.".to_string()),
+                ("plugin_storage".to_string(), "Persist Google Drive settings and cached workspace metadata.".to_string()),
+            ].into_iter().collect(),
+        }),
         ui: vec![
             serde_json::json!({
                 "slot": "StorageProvider",
@@ -130,10 +186,41 @@ pub fn manifest(_input: String) -> FnResult<String> {
                 "id": "gdrive-storage-settings",
                 "label": "Google Drive",
                 "icon": "cloud",
-                "component": {
-                    "type": "Iframe",
-                    "component_id": "storage.gdrive.settings",
-                }
+                "fields": [
+                    {
+                        "type": "Section",
+                        "label": "Connection",
+                        "description": "Uses a host-managed Google OAuth client with PKCE. No client secret is required in plugin settings."
+                    },
+                    {
+                        "type": "Button",
+                        "label": "Connect Google Drive",
+                        "command": "BeginOAuth"
+                    },
+                    {
+                        "type": "Button",
+                        "label": "Refresh Access Token",
+                        "command": "RefreshToken",
+                        "variant": "outline"
+                    },
+                    {
+                        "type": "Button",
+                        "label": "Disconnect",
+                        "command": "Disconnect",
+                        "variant": "destructive"
+                    },
+                    {
+                        "type": "Section",
+                        "label": "Storage Root",
+                        "description": "Google Drive folder ID to use as the workspace root. Use \"root\" for top-level Drive."
+                    },
+                    {
+                        "type": "Text",
+                        "key": "root_folder_id",
+                        "label": "Root Folder ID",
+                        "placeholder": "root"
+                    }
+                ]
             }),
         ],
         commands: vec![
@@ -149,11 +236,13 @@ pub fn manifest(_input: String) -> FnResult<String> {
             "ReadBinary".into(),
             "WriteBinary".into(),
             "GetModifiedTime".into(),
+            "BeginOAuth".into(),
+            "CompleteOAuth".into(),
             "RefreshToken".into(),
+            "Disconnect".into(),
             "ExchangeToken".into(),
             "GetConfig".into(),
             "SetConfig".into(),
-            "get_component_html".into(),
         ],
         cli: vec![],
     };
@@ -162,11 +251,8 @@ pub fn manifest(_input: String) -> FnResult<String> {
 
 #[plugin_fn]
 pub fn init(_input: String) -> FnResult<String> {
-    // Try to load config from storage
-    if let Ok(Some(data)) = host_bridge::storage_get("gdrive_config") {
-        if let Ok(config) = serde_json::from_slice::<GDriveConfig>(&data) {
-            CONFIG.with(|c| *c.borrow_mut() = Some(config));
-        }
+    if let Ok(Some(config)) = load_persisted_config() {
+        set_runtime_config(config);
     }
     Ok(String::new())
 }
@@ -193,17 +279,16 @@ pub fn on_event(_input: String) -> FnResult<String> {
 pub fn get_config(_input: String) -> FnResult<String> {
     let config = CONFIG.with(|c| c.borrow().clone());
     match config {
-        Some(c) => Ok(serde_json::to_string(&serde_json::to_value(&c)?)?),
-        None => Ok("{}".into()),
+        Some(c) => Ok(serde_json::to_string(&view_config(&c))?),
+        None => Ok(serde_json::to_string(&view_config(&default_config()))?),
     }
 }
 
 #[plugin_fn]
 pub fn set_config(input: String) -> FnResult<String> {
-    let config: GDriveConfig = serde_json::from_str(&input)?;
-    let data = serde_json::to_vec(&config)?;
-    let _ = host_bridge::storage_set("gdrive_config", &data);
-    CONFIG.with(|c| *c.borrow_mut() = Some(config));
+    let config: GDriveConfig = merge_with_current_config(serde_json::from_str(&input)?);
+    persist_config(&config).map_err(Error::msg)?;
+    set_runtime_config(config);
     Ok(String::new())
 }
 
@@ -373,15 +458,78 @@ fn dispatch_command(command: &str, params: &JsonValue) -> CommandResponse {
             }
         }
 
+        "BeginOAuth" => {
+            let client_id = params
+                .get("client_id")
+                .and_then(|v| v.as_str())
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    let fallback = current_config_or_default().client_id;
+                    if fallback.trim().is_empty() {
+                        None
+                    } else {
+                        Some(fallback)
+                    }
+                });
+            let Some(client_id) = client_id else {
+                return CommandResponse::err(
+                    "Google Drive OAuth is not configured for this build. Set a host-managed client ID.",
+                );
+            };
+            let redirect_uri = match params.get("redirect_uri").and_then(|v| v.as_str()) {
+                Some(uri) if !uri.trim().is_empty() => uri,
+                _ => return CommandResponse::err("Missing 'redirect_uri' parameter"),
+            };
+            let redirect_uri_prefix = params
+                .get("redirect_uri_prefix")
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(redirect_uri);
+            let code_challenge = match params.get("code_challenge").and_then(|v| v.as_str()) {
+                Some(value) if !value.trim().is_empty() => value,
+                _ => return CommandResponse::err("Missing 'code_challenge' parameter"),
+            };
+            let scope = "https://www.googleapis.com/auth/drive.file";
+            let auth_url = format!(
+                "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&code_challenge={}&code_challenge_method=S256",
+                gdrive_ops::uri_encode(&client_id),
+                gdrive_ops::uri_encode(redirect_uri),
+                gdrive_ops::uri_encode(scope),
+                gdrive_ops::uri_encode(code_challenge),
+            );
+            CommandResponse::ok(serde_json::json!({
+                "host_action": {
+                    "type": "open-oauth",
+                    "payload": {
+                        "url": auth_url,
+                        "redirect_uri_prefix": redirect_uri_prefix,
+                    }
+                },
+                "follow_up": {
+                    "command": "CompleteOAuth",
+                    "params": {
+                        "code_verifier": params.get("code_verifier").cloned().unwrap_or(JsonValue::Null),
+                    }
+                }
+            }))
+        }
+
         "RefreshToken" => match with_config(|c| gdrive_ops::refresh_token(c)) {
             Ok(Ok(new_token)) => {
-                // Update the stored config with new access token
-                let _ = with_config_mut(|c| {
+                let persist_result = with_config_mut(|c| {
                     c.access_token = new_token.clone();
-                    let data = serde_json::to_vec(c).unwrap_or_default();
-                    let _ = host_bridge::storage_set("gdrive_config", &data);
+                    persist_config(c)
                 });
-                CommandResponse::ok(serde_json::json!({ "access_token": new_token }))
+                match persist_result {
+                    Ok(Ok(())) => CommandResponse::ok(serde_json::json!({
+                        "access_token": new_token,
+                        "message": "Access token refreshed.",
+                    })),
+                    Ok(Err(e)) => CommandResponse::err(e),
+                    Err(e) => CommandResponse::err(e),
+                }
             }
             Ok(Err(e)) => CommandResponse::err(e),
             Err(e) => CommandResponse::err(e),
@@ -390,22 +538,26 @@ fn dispatch_command(command: &str, params: &JsonValue) -> CommandResponse {
         "GetConfig" => {
             let config = CONFIG.with(|c| c.borrow().clone());
             match config {
-                Some(c) => CommandResponse::ok(serde_json::to_value(c).unwrap_or_default()),
-                None => CommandResponse::ok(serde_json::json!({})),
+                Some(c) => CommandResponse::ok(view_config(&c)),
+                None => CommandResponse::ok(view_config(&default_config())),
             }
         }
 
         "SetConfig" => match serde_json::from_value::<GDriveConfig>(params.clone()) {
             Ok(config) => {
-                let data = serde_json::to_vec(&config).unwrap_or_default();
-                let _ = host_bridge::storage_set("gdrive_config", &data);
-                CONFIG.with(|c| *c.borrow_mut() = Some(config));
-                CommandResponse::ok_empty()
+                let config = merge_with_current_config(config);
+                match persist_config(&config) {
+                    Ok(()) => {
+                        set_runtime_config(config);
+                        CommandResponse::ok_empty()
+                    }
+                    Err(e) => CommandResponse::err(e),
+                }
             }
             Err(e) => CommandResponse::err(format!("Invalid GDrive config: {e}")),
         },
 
-        "ExchangeToken" => {
+        "CompleteOAuth" | "ExchangeToken" => {
             let code = match params.get("code").and_then(|v| v.as_str()) {
                 Some(c) => c,
                 None => return CommandResponse::err("Missing 'code' parameter"),
@@ -414,34 +566,56 @@ fn dispatch_command(command: &str, params: &JsonValue) -> CommandResponse {
                 Some(r) => r,
                 None => return CommandResponse::err("Missing 'redirect_uri' parameter"),
             };
-            match with_config(|c| gdrive_ops::exchange_token(c, code, redirect_uri)) {
+            let code_verifier = match params.get("code_verifier").and_then(|v| v.as_str()) {
+                Some(v) if !v.trim().is_empty() => v,
+                _ => return CommandResponse::err("Missing 'code_verifier' parameter"),
+            };
+            match with_config(|c| gdrive_ops::exchange_token(c, code, redirect_uri, code_verifier))
+            {
                 Ok(Ok((access_token, refresh_token))) => {
-                    let _ = with_config_mut(|c| {
+                    let persist_result = with_config_mut(|c| {
                         c.access_token = access_token.clone();
                         c.refresh_token = refresh_token.clone();
-                        let data = serde_json::to_vec(c).unwrap_or_default();
-                        let _ = host_bridge::storage_set("gdrive_config", &data);
+                        persist_config(c)
                     });
-                    CommandResponse::ok(serde_json::json!({
-                        "access_token": access_token,
-                        "refresh_token": refresh_token,
-                    }))
+                    match persist_result {
+                        Ok(Ok(())) => CommandResponse::ok(serde_json::json!({
+                            "message": "Connected to Google Drive.",
+                        })),
+                        Ok(Err(e)) => CommandResponse::err(e),
+                        Err(e) => CommandResponse::err(e),
+                    }
                 }
                 Ok(Err(e)) => CommandResponse::err(e),
                 Err(e) => CommandResponse::err(e),
             }
         }
 
-        "get_component_html" => {
-            let component_id = params
-                .get("component_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            match component_id {
-                "storage.gdrive.settings" => CommandResponse::ok(serde_json::json!({
-                    "html": include_str!("ui/settings.html"),
+        "Disconnect" => {
+            let persist_result = with_config_mut(|c| {
+                c.access_token.clear();
+                c.refresh_token.clear();
+                persist_config(c)
+            });
+            match persist_result {
+                Ok(Ok(())) => CommandResponse::ok(serde_json::json!({
+                    "message": "Disconnected from Google Drive.",
                 })),
-                _ => CommandResponse::err(format!("Unknown component: {component_id}")),
+                Ok(Err(e)) => CommandResponse::err(e),
+                Err(_) => {
+                    let mut config = current_config_or_default();
+                    config.access_token.clear();
+                    config.refresh_token.clear();
+                    match persist_config(&config) {
+                        Ok(()) => {
+                            set_runtime_config(config);
+                            CommandResponse::ok(serde_json::json!({
+                                "message": "Disconnected from Google Drive.",
+                            }))
+                        }
+                        Err(e) => CommandResponse::err(e),
+                    }
+                }
             }
         }
 

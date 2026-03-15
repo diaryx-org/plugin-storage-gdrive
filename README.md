@@ -2,7 +2,7 @@
 title: "Google Drive Storage"
 description: "Google Drive as a filesystem backend"
 id: "diaryx.storage.gdrive"
-version: "0.1.0"
+version: "0.1.1"
 author: "Diaryx Team"
 license: "PolyForm Shield 1.0.0"
 repository: "https://github.com/diaryx-org/plugin-storage-gdrive"
@@ -21,6 +21,15 @@ ui:
   - slot: SettingsTab
     id: gdrive-storage-settings
     label: "Google Drive"
+requested_permissions:
+  defaults:
+    http_requests:
+      include: ["googleapis.com"]
+    plugin_storage:
+      include: ["all"]
+  reasons:
+    http_requests: "Communicate with Google Drive and Google OAuth API endpoints."
+    plugin_storage: "Persist Google Drive settings and cached workspace metadata."
 ---
 
 # diaryx_storage_gdrive_extism
@@ -40,7 +49,9 @@ Browser:  pluginFileSystem.ts → Extism plugin → host_http_request → Google
 Native:   PluginFileSystem    → Extism plugin → host_http_request → Google Drive API
 ```
 
-OAuth sign-in stays in the browser (requires user interaction). After sign-in, the frontend passes tokens to the plugin via `SetConfig`. The plugin handles token refresh internally via `RefreshToken`.
+OAuth sign-in uses a declarative settings tab plus PKCE. Diaryx provides the Google client ID at runtime, opens the OAuth window, and the plugin stores tokens outside normal config via host secret storage. The plugin handles token refresh internally via `RefreshToken`.
+
+Runtime client IDs are expected from the host app via `VITE_GOOGLE_DRIVE_CLIENT_ID` or the platform-specific `VITE_GOOGLE_DRIVE_WEB_CLIENT_ID` / `VITE_GOOGLE_DRIVE_DESKTOP_CLIENT_ID` environment variables.
 
 ## Commands
 
@@ -58,8 +69,10 @@ OAuth sign-in stays in the browser (requires user interaction). After sign-in, t
 | `ReadBinary` | `read_binary(path)` | GET (binary) |
 | `WriteBinary` | `write_binary(path, data)` | Multipart upload (binary) |
 | `GetModifiedTime` | `get_modified_time(path)` | GET modifiedTime field |
+| `BeginOAuth` / `CompleteOAuth` | — | PKCE auth URL + code exchange |
+| `Disconnect` | — | Clear stored tokens |
 | `RefreshToken` | — | OAuth token refresh |
-| `GetConfig` / `SetConfig` | — | OAuth credentials |
+| `GetConfig` / `SetConfig` | — | Non-secret plugin settings |
 
 ## Build
 

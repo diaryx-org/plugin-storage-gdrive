@@ -1,6 +1,6 @@
 //! Google Drive REST API operations mapping to AsyncFileSystem methods.
 
-use crate::host_bridge;
+use diaryx_plugin_sdk::prelude::*;
 use crate::multipart;
 use std::collections::HashMap;
 
@@ -11,10 +11,12 @@ const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 /// Google Drive configuration.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
 pub struct GDriveConfig {
+    #[serde(default)]
     pub access_token: String,
+    #[serde(default)]
     pub refresh_token: String,
+    #[serde(default)]
     pub client_id: String,
-    pub client_secret: String,
     /// Root folder ID in Google Drive (defaults to "root").
     #[serde(default = "default_root")]
     pub root_folder_id: String,
@@ -38,9 +40,8 @@ impl GDriveConfig {
 /// Refresh the OAuth access token. Returns the new access token.
 pub fn refresh_token(config: &GDriveConfig) -> Result<String, String> {
     let body = format!(
-        "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
+        "client_id={}&refresh_token={}&grant_type=refresh_token",
         uri_encode(&config.client_id),
-        uri_encode(&config.client_secret),
         uri_encode(&config.refresh_token),
     );
     let mut headers = HashMap::new();
@@ -48,9 +49,9 @@ pub fn refresh_token(config: &GDriveConfig) -> Result<String, String> {
         "Content-Type".to_string(),
         "application/x-www-form-urlencoded".to_string(),
     );
-    let resp = host_bridge::http_request(
-        "https://oauth2.googleapis.com/token",
+    let resp = host::http::request(
         "POST",
+        "https://oauth2.googleapis.com/token",
         &headers,
         Some(&body),
     )?;
@@ -75,12 +76,13 @@ pub fn exchange_token(
     config: &GDriveConfig,
     code: &str,
     redirect_uri: &str,
+    code_verifier: &str,
 ) -> Result<(String, String), String> {
     let body = format!(
-        "client_id={}&client_secret={}&code={}&redirect_uri={}&grant_type=authorization_code",
+        "client_id={}&code={}&code_verifier={}&redirect_uri={}&grant_type=authorization_code",
         uri_encode(&config.client_id),
-        uri_encode(&config.client_secret),
         uri_encode(code),
+        uri_encode(code_verifier),
         uri_encode(redirect_uri),
     );
     let mut headers = HashMap::new();
@@ -88,9 +90,9 @@ pub fn exchange_token(
         "Content-Type".to_string(),
         "application/x-www-form-urlencoded".to_string(),
     );
-    let resp = host_bridge::http_request(
-        "https://oauth2.googleapis.com/token",
+    let resp = host::http::request(
         "POST",
+        "https://oauth2.googleapis.com/token",
         &headers,
         Some(&body),
     )?;
@@ -142,7 +144,7 @@ fn resolve_path(config: &GDriveConfig, path: &str) -> Result<Option<(String, boo
             uri_encode(&query)
         );
 
-        let resp = host_bridge::http_request(&url, "GET", &config.auth_headers(), None)?;
+        let resp = host::http::request("GET", &url, &config.auth_headers(), None)?;
         if resp.status != 200 {
             return Err(format!(
                 "GDrive search failed ({}): {}",
@@ -220,7 +222,7 @@ fn get_or_create_folder(
         "{API_BASE}/files?q={}&fields=files(id)&pageSize=1",
         uri_encode(&query)
     );
-    let resp = host_bridge::http_request(&url, "GET", &config.auth_headers(), None)?;
+    let resp = host::http::request("GET", &url, &config.auth_headers(), None)?;
     if resp.status == 200 {
         let parsed: serde_json::Value =
             serde_json::from_str(&resp.body).map_err(|e| format!("parse: {e}"))?;
@@ -241,9 +243,9 @@ fn get_or_create_folder(
     });
     let mut headers = config.auth_headers();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
-    let resp = host_bridge::http_request(
-        &format!("{API_BASE}/files"),
+    let resp = host::http::request(
         "POST",
+        &format!("{API_BASE}/files"),
         &headers,
         Some(&metadata.to_string()),
     )?;
@@ -266,7 +268,7 @@ fn get_or_create_folder(
 pub fn read_file(config: &GDriveConfig, path: &str) -> Result<String, String> {
     let (file_id, _) = resolve_path(config, path)?.ok_or_else(|| format!("NotFound: {path}"))?;
     let url = format!("{API_BASE}/files/{file_id}?alt=media");
-    let resp = host_bridge::http_request(&url, "GET", &config.auth_headers(), None)?;
+    let resp = host::http::request("GET", &url, &config.auth_headers(), None)?;
     if resp.status == 200 {
         Ok(resp.body)
     } else {
@@ -281,9 +283,9 @@ pub fn read_file(config: &GDriveConfig, path: &str) -> Result<String, String> {
 pub fn read_binary(config: &GDriveConfig, path: &str) -> Result<Vec<u8>, String> {
     let (file_id, _) = resolve_path(config, path)?.ok_or_else(|| format!("NotFound: {path}"))?;
     let url = format!("{API_BASE}/files/{file_id}?alt=media");
-    let resp = host_bridge::http_request(&url, "GET", &config.auth_headers(), None)?;
+    let resp = host::http::request("GET", &url, &config.auth_headers(), None)?;
     if resp.status == 200 {
-        host_bridge::decode_response_body(&resp)
+        resp.body_bytes()
     } else {
         Err(format!(
             "GDrive read failed ({}): {}",
@@ -321,7 +323,7 @@ fn write_bytes(
         let url = format!("{UPLOAD_BASE}/files/{file_id}?uploadType=media",);
         let mut headers = config.auth_headers();
         headers.insert("Content-Type".to_string(), content_type.to_string());
-        let resp = host_bridge::http_request_binary(&url, "PATCH", &headers, content)?;
+        let resp = host::http::request_binary("PATCH", &url, &headers, content)?;
         if resp.status == 200 {
             Ok(())
         } else {
@@ -342,7 +344,7 @@ fn write_bytes(
         let url = format!("{UPLOAD_BASE}/files?uploadType=multipart");
         let mut headers = config.auth_headers();
         headers.insert("Content-Type".to_string(), ct);
-        let resp = host_bridge::http_request_binary(&url, "POST", &headers, &body)?;
+        let resp = host::http::request_binary("POST", &url, &headers, &body)?;
         if resp.status == 200 {
             Ok(())
         } else {
@@ -359,7 +361,7 @@ pub fn delete_file(config: &GDriveConfig, path: &str) -> Result<(), String> {
     let resolved = resolve_path(config, path)?;
     if let Some((file_id, _)) = resolved {
         let url = format!("{API_BASE}/files/{file_id}");
-        let resp = host_bridge::http_request(&url, "DELETE", &config.auth_headers(), None)?;
+        let resp = host::http::request("DELETE", &url, &config.auth_headers(), None)?;
         if resp.status == 204 || resp.status == 200 || resp.status == 404 {
             Ok(())
         } else {
@@ -399,7 +401,7 @@ pub fn list_files(config: &GDriveConfig, dir: &str) -> Result<Vec<String>, Strin
         "{API_BASE}/files?q={}&fields=files(name)&pageSize=1000",
         uri_encode(&query)
     );
-    let resp = host_bridge::http_request(&url, "GET", &config.auth_headers(), None)?;
+    let resp = host::http::request("GET", &url, &config.auth_headers(), None)?;
     if resp.status != 200 {
         return Err(format!(
             "GDrive list failed ({}): {}",
@@ -451,7 +453,7 @@ pub fn move_file(config: &GDriveConfig, from: &str, to: &str) -> Result<(), Stri
 
     // Get current parent
     let info_url = format!("{API_BASE}/files/{file_id}?fields=parents");
-    let info_resp = host_bridge::http_request(&info_url, "GET", &config.auth_headers(), None)?;
+    let info_resp = host::http::request("GET", &info_url, &config.auth_headers(), None)?;
     let old_parent = if info_resp.status == 200 {
         let parsed: serde_json::Value = serde_json::from_str(&info_resp.body).unwrap_or_default();
         parsed
@@ -470,7 +472,7 @@ pub fn move_file(config: &GDriveConfig, from: &str, to: &str) -> Result<(), Stri
     let metadata = serde_json::json!({ "name": new_name });
     let mut headers = config.auth_headers();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
-    let resp = host_bridge::http_request(&url, "PATCH", &headers, Some(&metadata.to_string()))?;
+    let resp = host::http::request("PATCH", &url, &headers, Some(&metadata.to_string()))?;
     if resp.status == 200 {
         Ok(())
     } else {
@@ -489,13 +491,13 @@ pub fn get_modified_time(config: &GDriveConfig, path: &str) -> Result<Option<i64
         None => return Ok(None),
     };
     let url = format!("{API_BASE}/files/{file_id}?fields=modifiedTime");
-    let resp = host_bridge::http_request(&url, "GET", &config.auth_headers(), None)?;
+    let resp = host::http::request("GET", &url, &config.auth_headers(), None)?;
     if resp.status != 200 {
         return Ok(None);
     }
     // modifiedTime is RFC 3339 — just return current time as approximation
     // since parsing RFC 3339 without chrono is verbose
-    let ts = host_bridge::storage_get("_last_timestamp")
+    let ts = host::storage::get("_last_timestamp")
         .ok()
         .flatten()
         .and_then(|b| String::from_utf8(b).ok())
@@ -509,7 +511,7 @@ fn escape_query(s: &str) -> String {
 }
 
 /// URI-encode a string.
-fn uri_encode(s: &str) -> String {
+pub(crate) fn uri_encode(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len() * 2);
     for b in s.bytes() {
         match b {
