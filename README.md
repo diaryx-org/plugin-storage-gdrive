@@ -2,7 +2,7 @@
 title: "Google Drive Storage"
 description: "Google Drive as a filesystem backend"
 id: "diaryx.storage.gdrive"
-version: "0.1.1"
+version: "0.1.2"
 author: "Diaryx Team"
 license: "PolyForm Shield 1.0.0"
 repository: "https://github.com/diaryx-org/plugin-storage-gdrive"
