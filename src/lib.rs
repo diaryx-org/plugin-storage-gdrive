@@ -156,96 +156,94 @@ fn view_config(config: &GDriveConfig) -> JsonValue {
 
 #[plugin_fn]
 pub fn manifest(_input: String) -> FnResult<String> {
-    let m = GuestManifest {
-        protocol_version: CURRENT_PROTOCOL_VERSION,
-        id: "diaryx.storage.gdrive".into(),
-        name: "Google Drive Storage".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        description: "Google Drive as a filesystem backend".into(),
-        capabilities: vec!["custom_commands".into()],
-        requested_permissions: Some(GuestRequestedPermissions {
-            defaults: serde_json::json!({
-                "http_requests": { "include": ["googleapis.com"], "exclude": [] },
-                "plugin_storage": { "include": ["all"], "exclude": [] }
-            }),
-            reasons: [
-                ("http_requests".to_string(), "Communicate with Google Drive and Google OAuth API endpoints.".to_string()),
-                ("plugin_storage".to_string(), "Persist Google Drive settings and cached workspace metadata.".to_string()),
-            ].into_iter().collect(),
+    let m = GuestManifest::new(
+        "diaryx.storage.gdrive",
+        "Google Drive Storage",
+        env!("CARGO_PKG_VERSION"),
+        "Google Drive as a filesystem backend",
+        vec!["custom_commands".into()],
+    )
+    .ui(vec![
+        serde_json::json!({
+            "slot": "StorageProvider",
+            "id": "diaryx.storage.gdrive",
+            "label": "Google Drive",
+            "icon": "cloud",
+            "description": "Store files in Google Drive"
         }),
-        ui: vec![
-            serde_json::json!({
-                "slot": "StorageProvider",
-                "id": "diaryx.storage.gdrive",
-                "label": "Google Drive",
-                "icon": "cloud",
-                "description": "Store files in Google Drive"
-            }),
-            serde_json::json!({
-                "slot": "SettingsTab",
-                "id": "gdrive-storage-settings",
-                "label": "Google Drive",
-                "icon": "cloud",
-                "fields": [
-                    {
-                        "type": "Section",
-                        "label": "Connection",
-                        "description": "Uses a host-managed Google OAuth client with PKCE. No client secret is required in plugin settings."
-                    },
-                    {
-                        "type": "Button",
-                        "label": "Connect Google Drive",
-                        "command": "BeginOAuth"
-                    },
-                    {
-                        "type": "Button",
-                        "label": "Refresh Access Token",
-                        "command": "RefreshToken",
-                        "variant": "outline"
-                    },
-                    {
-                        "type": "Button",
-                        "label": "Disconnect",
-                        "command": "Disconnect",
-                        "variant": "destructive"
-                    },
-                    {
-                        "type": "Section",
-                        "label": "Storage Root",
-                        "description": "Google Drive folder ID to use as the workspace root. Use \"root\" for top-level Drive."
-                    },
-                    {
-                        "type": "Text",
-                        "key": "root_folder_id",
-                        "label": "Root Folder ID",
-                        "placeholder": "root"
-                    }
-                ]
-            }),
-        ],
-        commands: vec![
-            "ReadFile".into(),
-            "WriteFile".into(),
-            "DeleteFile".into(),
-            "Exists".into(),
-            "ListFiles".into(),
-            "ListMdFiles".into(),
-            "CreateDirAll".into(),
-            "IsDir".into(),
-            "MoveFile".into(),
-            "ReadBinary".into(),
-            "WriteBinary".into(),
-            "GetModifiedTime".into(),
-            "BeginOAuth".into(),
-            "CompleteOAuth".into(),
-            "RefreshToken".into(),
-            "Disconnect".into(),
-            "ExchangeToken".into(),
-            "GetConfig".into(),
-            "SetConfig".into(),
-        ],
-        cli: vec![],
-    };
+        serde_json::json!({
+            "slot": "SettingsTab",
+            "id": "gdrive-storage-settings",
+            "label": "Google Drive",
+            "icon": "cloud",
+            "fields": [
+                {
+                    "type": "Section",
+                    "label": "Connection",
+                    "description": "Uses a host-managed Google OAuth client with PKCE. No client secret is required in plugin settings."
+                },
+                {
+                    "type": "Button",
+                    "label": "Connect Google Drive",
+                    "command": "BeginOAuth"
+                },
+                {
+                    "type": "Button",
+                    "label": "Refresh Access Token",
+                    "command": "RefreshToken",
+                    "variant": "outline"
+                },
+                {
+                    "type": "Button",
+                    "label": "Disconnect",
+                    "command": "Disconnect",
+                    "variant": "destructive"
+                },
+                {
+                    "type": "Section",
+                    "label": "Storage Root",
+                    "description": "Google Drive folder ID to use as the workspace root. Use \"root\" for top-level Drive."
+                },
+                {
+                    "type": "Text",
+                    "key": "root_folder_id",
+                    "label": "Root Folder ID",
+                    "placeholder": "root"
+                }
+            ]
+        }),
+    ])
+    .commands(vec![
+        "ReadFile".into(),
+        "WriteFile".into(),
+        "DeleteFile".into(),
+        "Exists".into(),
+        "ListFiles".into(),
+        "ListMdFiles".into(),
+        "CreateDirAll".into(),
+        "IsDir".into(),
+        "MoveFile".into(),
+        "ReadBinary".into(),
+        "WriteBinary".into(),
+        "GetModifiedTime".into(),
+        "BeginOAuth".into(),
+        "CompleteOAuth".into(),
+        "RefreshToken".into(),
+        "Disconnect".into(),
+        "ExchangeToken".into(),
+        "GetConfig".into(),
+        "SetConfig".into(),
+    ])
+    .requested_permissions(GuestRequestedPermissions {
+        defaults: serde_json::json!({
+            "http_requests": { "include": ["googleapis.com"], "exclude": [] },
+            "plugin_storage": { "include": ["all"], "exclude": [] }
+        }),
+        reasons: [
+            ("http_requests".to_string(), "Communicate with Google Drive and Google OAuth API endpoints.".to_string()),
+            ("plugin_storage".to_string(), "Persist Google Drive settings and cached workspace metadata.".to_string()),
+        ].into_iter().collect(),
+    });
     Ok(serde_json::to_string(&m)?)
 }
 
